@@ -1,0 +1,226 @@
+# =============================================================================
+# Digital Twin 5.0 (DT5) — Empirically Calibrated Genetic Architecture
+# Marroni 2026 | BD-II Primary Prevention
+# =============================================================================
+# Design:
+#   Replaces DT3 synthetic effect-size distribution with one calibrated to
+#   Mullins 2021 PGC3 BD GWAS summary statistics:
+#     - daner_bip_pgc3_nm_noukbiobank.gz
+#     - N=40,463 BD cases / 313,436 controls
+#     - mean|beta|=0.0168 (vs DT3: mean|beta|=0.077 via sigma=0.044)
+#     - Range: -0.49 to +0.42
+#   Effect sizes sampled from Half-Normal calibrated to mean|beta|=0.0168
+#   (NOT per-SNP betas; no rsID crossmatch performed — see paper Methods)
+#
+#   Central innovation: PRS modulates individual baseline risk at T=0
+#     Bi = N(60, 10) + 3 * PRS_z_i
+#
+#   Outcome: PHQ2 transition at 1 year (12 months), mirroring DT4/MEPS
+#   NOTE: DT5 NNT (PHQ2, 1yr) and DT3 NNT (BD-II, 10yr) are DIFFERENT
+#         estimands. Do not compare directly.
+# =============================================================================
+
+library(tidyverse)
+library(survival)
+
+# Source DT3 to reuse genotype simulation infrastructure
+# (or copy relevant functions directly if running standalone)
+# source("DT3/dt3_simulation.R")
+
+# ── Parameters ───────────────────────────────────────────────────────────────
+
+N_TOTAL      <- 2000
+N_SNPS       <- 500
+T_PRIMARY    <- 12          # PHQ2 outcome at 1 year (12 months)
+ALPHA        <- 0.18        # monthly progression (Control)
+DELTA_BASE   <- -0.04       # base case (same as DT3)
+SIGMA_EPS    <- 1.0
+R0_MEAN      <- 60
+R0_SD        <- 10
+THRESH_PHQ2  <- 85          # threshold mapped to PHQ2>=3 transition
+MAF_WEIGHT_EXP <- 0.15
+
+# DT5-specific: Mullins 2021 PGC3 empirical calibration
+MEAN_BETA_DT5 <- 0.0168     # empirical mean|beta| (vs DT3: 0.077 approx)
+SIGMA_DT5     <- MEAN_BETA_DT5 * sqrt(pi / 2)  # Half-Normal: E[|X|] = sigma*sqrt(2/pi)
+
+PRS_BASELINE_WEIGHT <- 3.0  # PRS z-score contribution to baseline risk
+
+N_SEEDS <- 200
+
+# ── UKB allele frequency pool ────────────────────────────────────────────────
+
+simulate_ukb_af_pool <- function(n_snps, seed = 1) {
+  set.seed(seed)
+  af <- rbeta(n_snps * 10, 1.5, 1.5)
+  af <- af[af >= 0.01 & af <= 0.49]
+  af[1:n_snps]
+}
+
+# ── DT5 PRS simulation (Mullins 2021 calibration) ────────────────────────────
+
+simulate_prs_dt5 <- function(n_individuals, af_pool, seed) {
+  set.seed(seed)
+  n_snps <- length(af_pool)
+
+  # Genotypes: Binomial(2, af_j)
+  G <- matrix(
+    rbinom(n_individuals * n_snps, size = 2, prob = rep(af_pool, each = n_individuals)),
+    nrow = n_individuals,
+    ncol = n_snps
+  )
+
+  # Effect sizes: Half-Normal calibrated to mean|beta|=0.0168 (Mullins 2021)
+  # SIGMA_DT5 derived so that E[|beta|] = 0.0168
+  raw_beta <- abs(rnorm(n_snps, mean = 0, sd = SIGMA_DT5))
+  maf      <- pmin(af_pool, 1 - af_pool)
+  weights  <- (0.5 / maf)^MAF_WEIGHT_EXP
+  beta     <- raw_beta * weights
+
+  signs <- sample(c(-1, 1), n_snps, replace = TRUE)
+  beta  <- beta * signs
+
+  prs <- as.numeric(G %*% beta)
+  prs
+}
+
+# ── Single-seed DT5 simulation ────────────────────────────────────────────────
+
+run_dt5_seed <- function(seed, delta = DELTA_BASE, af_pool) {
+  set.seed(seed)
+
+  # PRS
+  prs   <- simulate_prs_dt5(N_TOTAL, af_pool, seed = seed)
+  prs_z <- (prs - mean(prs)) / sd(prs)   # standardised PRS
+
+  # Eligibility: top PRS quartile
+  prs_threshold <- quantile(prs, 0.75)
+  eligible      <- which(prs >= prs_threshold)
+  n_elig        <- length(eligible)
+
+  arm <- sample(c("Prevented", "Control"), n_elig, replace = TRUE)
+
+  results <- vector("list", n_elig)
+
+  for (i in seq_along(eligible)) {
+    idx <- eligible[i]
+
+    # DT5 central innovation: PRS modulates baseline risk
+    r <- rnorm(1, mean = R0_MEAN, sd = R0_SD) + PRS_BASELINE_WEIGHT * prs_z[idx]
+
+    t_phq2 <- NA
+
+    for (t in 1:T_PRIMARY) {
+      eps <- rnorm(1, 0, SIGMA_EPS)
+      d   <- if (arm[i] == "Prevented") delta else 0
+      r   <- r + ALPHA + d + eps
+
+      if (r >= THRESH_PHQ2) {
+        t_phq2 <- t
+        break
+      }
+    }
+
+    results[[i]] <- list(
+      id     = idx,
+      arm    = arm[i],
+      prs    = prs[idx],
+      prs_z  = prs_z[idx],
+      t_phq2 = t_phq2
+    )
+  }
+
+  df <- bind_rows(lapply(results, as.data.frame))
+
+  # --- Outcomes at T_PRIMARY (1 year = 12 months) ---
+  df <- df %>%
+    mutate(
+      event_phq2 = !is.na(t_phq2) & t_phq2 <= T_PRIMARY,
+      time_phq2  = ifelse(!is.na(t_phq2), pmin(t_phq2, T_PRIMARY), T_PRIMARY)
+    )
+
+  r_control   <- mean(df$event_phq2[df$arm == "Control"])
+  r_prevented <- mean(df$event_phq2[df$arm == "Prevented"])
+  rr          <- r_prevented / r_control
+  rd          <- r_control - r_prevented
+  nnt         <- if (rd > 0) 1 / rd else NA
+
+  list(
+    seed        = seed,
+    delta       = delta,
+    r_control   = r_control,
+    r_prevented = r_prevented,
+    rr          = rr,
+    rd          = rd,
+    nnt         = nnt
+  )
+}
+
+# ── Bootstrap over 200 seeds ─────────────────────────────────────────────────
+
+run_dt5_bootstrap <- function(delta = DELTA_BASE, af_pool, n_seeds = N_SEEDS,
+                               verbose = TRUE) {
+  message("Running DT5 | delta = ", delta, " | ", n_seeds, " seeds")
+  message("  Calibration: mean|beta| = ", MEAN_BETA_DT5,
+          " (Mullins 2021 PGC3) vs DT3: ~0.077")
+
+  out <- lapply(seq_len(n_seeds), function(s) {
+    if (verbose && s %% 50 == 0) message("  seed ", s, "/", n_seeds)
+    run_dt5_seed(seed = s, delta = delta, af_pool = af_pool)
+  })
+
+  bind_rows(lapply(out, as.data.frame))
+}
+
+# ── Summary statistics ────────────────────────────────────────────────────────
+
+summarise_dt5 <- function(results_df) {
+  results_df %>%
+    summarise(
+      n_seeds          = n(),
+      median_nnt       = median(nnt, na.rm = TRUE),
+      ci_nnt_lo        = quantile(nnt, 0.025, na.rm = TRUE),
+      ci_nnt_hi        = quantile(nnt, 0.975, na.rm = TRUE),
+      median_rr        = median(rr, na.rm = TRUE),
+      ci_rr_lo         = quantile(rr, 0.025, na.rm = TRUE),
+      ci_rr_hi         = quantile(rr, 0.975, na.rm = TRUE),
+      pct_rr_lt1       = mean(rr < 1.0, na.rm = TRUE) * 100,
+      median_r_control = median(r_control, na.rm = TRUE),
+      median_r_prev    = median(r_prevented, na.rm = TRUE)
+    ) %>%
+    mutate(
+      outcome    = "PHQ2 transition at 1 year",
+      calibration = paste0("Mullins 2021 PGC3 | mean|beta|=", MEAN_BETA_DT5)
+    )
+}
+
+# ── Main execution ────────────────────────────────────────────────────────────
+
+main_dt5 <- function() {
+  message("=== DT5: Empirically Calibrated Simulation (Mullins 2021 PGC3) ===")
+  message("Generating UKB AF pool (N=", N_SNPS, " SNPs) ...")
+  af_pool <- simulate_ukb_af_pool(N_SNPS, seed = 42)
+
+  results_df <- run_dt5_bootstrap(delta = DELTA_BASE, af_pool = af_pool,
+                                   n_seeds = N_SEEDS)
+  summary_df <- summarise_dt5(results_df)
+
+  message("\n>>> NNT_PHQ2_1yr (median): ", round(summary_df$median_nnt, 1),
+          " (95% CI ", round(summary_df$ci_nnt_lo, 1), "–",
+          round(summary_df$ci_nnt_hi, 1), ")")
+  message(">>> RR (median): ", round(summary_df$median_rr, 3))
+  message(">>> RR < 1.0 in ", round(summary_df$pct_rr_lt1, 1), "% of seeds")
+  message("\nNOTE: DT5 NNT (PHQ2, 1yr) is a different estimand from DT3 NNT")
+  message("      (BD-II, 10yr). These must NOT be directly compared.")
+
+  dir.create("DT5/results", recursive = TRUE, showWarnings = FALSE)
+  write.csv(results_df, "DT5/results/dt5_seeds_all.csv",        row.names = FALSE)
+  write.csv(summary_df, "DT5/results/dt5_summary_NNT_RR.csv",   row.names = FALSE)
+  message("\nResults written to DT5/results/")
+
+  list(results = results_df, summary = summary_df)
+}
+
+# Run
+dt5_output <- main_dt5()
+print(dt5_output$summary)
