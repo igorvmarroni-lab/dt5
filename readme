@@ -1,0 +1,97 @@
+BD-II Prevention — Genomic Simulation Code and Data Tables
+Marroni 2026 | F1000Research
+
+Simulation code, bootstrap result tables, and data provenance documentation for:
+"The Pre-Depression Window in Bipolar II Disorder: A Three-Framework, Multi-Scenario Genomic Simulation Study with Clinical Prevention Protocol for Asymptomatic First-Degree Relatives"
+
+
+⚠️ Epistemic Status — Read Before Using
+All NNT, RR, and HR estimates in this repository are outputs of calibrated simulation models, not results from a clinical trial or observational study. They describe what the models predict under stated assumptions. They are not evidence that the intervention prevents BD-II in humans. The only evidence that would establish clinical efficacy is a randomised controlled trial, which does not yet exist.
+The recommended trial planning NNT is 19 (base case δ = −0.04 with 20% attrition), not 10.9. The δ = −0.06 scenario is the efficacy upper bound and should not be used as a primary planning figure.
+
+Overview
+This repository contains all simulation code and result tables supporting a three-framework genomic simulation study of primary prevention in asymptomatic first-degree relatives of BD-II patients (ages 5–20). The three frameworks are:
+FrameworkTypeNData sourceDT3 — Digital Twin 3.0Synthetic individual simulation2,000 individuals · 200 seedsUK Biobank allele frequencies (IEU Open GWAS ukb-b-6906)DT4 — Digital Twin 4.0Plasmode simulation (causal validation)3,398 high-distress non-casesMEPS longitudinal data (AHRQ 1996–2023)DT5 — Digital Twin 5.0Empirically calibrated simulation153,914 variants · 200 seedsUKB allele frequencies + Mullins 2021 PGC3 summary statistics
+
+Repository Structure
+/
+├── README.md
+├── DT3/
+│   ├── dt3_simulation.R          # Main DT3 script (synthetic, 3-scenario)
+│   ├── dt3_bootstrap.R           # 200-seed bootstrap loop
+│   └── results/
+│       ├── dt3_seeds_base.csv        # δ = −0.04 · all 200 seeds
+│       ├── dt3_seeds_optimistic.csv  # δ = −0.06
+│       ├── dt3_seeds_minimal.csv     # δ = −0.02
+│       └── dt3_summary_NNT_RR.csv    # NNT · 95%CI · RR per scenario
+├── DT4/
+│   ├── dt4_plasmode.R            # Plasmode causal validation
+│   ├── dt4_bootstrap.R           # 200-seed bootstrap over real MEPS data
+│   └── results/
+│       ├── dt4_seeds_all.csv         # RR and RD per seed
+│       └── dt4_summary_bias.csv      # Bias · coverage · directional robustness
+├── DT5/
+│   ├── dt5_empirical.R           # DT5: empirical Mullins 2021 calibration
+│   ├── dt5_prs_module.R          # PRS computation from UKB allele frequencies
+│   └── results/
+│       ├── dt5_seeds_all.csv         # NNT · RR per seed
+│       └── dt5_summary_NNT_RR.csv
+├── data/
+│   └── DATA_SOURCES.md           # Provenance of all input data (no individual-level data)
+└── supplementary/
+    └── prevention_protocol.pdf   # Seven-component clinical prevention protocol
+
+Key Results
+DT3 — Three-Scenario Sensitivity Analysis
+Scenarioδ (monthly)Risk reductionBD-II conversion (Control)BD-II conversion (Prevented)NNT (95% CI)RRMinimal−0.0211%16.0%—25.0 (10.5–125.0)0.759Base case (recommended)−0.0422%16.0%9.2%15.6 (8.3–42.5)0.591Optimistic (upper bound)−0.0633%16.0%—10.9 (7.1–27.9)0.432
+Trial planning NNT (base case + 20% attrition): 19. RR < 1.0 in 100% of 200 seeds.
+DT4 — Plasmode Causal Validation
+
+RR recovered with absolute bias = 0.002 (< 0.3%) across 200 real-data bootstrap seeds
+RD negative in 100% of seeds — confirms directional robustness of the estimation pipeline
+RR_true injected = 0.741
+
+DT5 — Empirically Calibrated (Mullins 2021 PGC3 Architecture)
+
+mean|β| = 0.0168 (4.6× smaller than DT3 calibration)
+NNT₍PHQ2, 1yr₎ = 8.6 (95% CI 5.8–22.7); RR = 0.492
+RR < 1.0 in 100% of seeds
+MEPS empirical annual PHQ2 transition rate: 14.9% (high-distress stratum, K6SUM ≥ 7; N = 3,398)
+
+
+Data Sources
+No individual-level genomic or clinical data are included in this repository. All inputs are from public sources:
+DataSourceAccessUK Biobank allele frequenciesIEU Open GWAS · ukb-b-6906 · N = 153,914 PASS variantshttps://gwas.mrcieu.ac.ukBD GWAS effect sizes (DT3 calibration)Mullins et al. 2021 · Nat Genet 53:817–829 · mean|β| = 0.077https://pgc.unc.eduBD GWAS summary statistics (DT5)PGC3 · daner_bip_pgc3_nm_noukbiobank.gz · N = 40,463 cases / 313,436 controlshttps://pgc.unc.eduMEPS longitudinal data (DT4)AHRQ · Medical Expenditure Panel Survey · 1996–2023 · N = 28,052 non-cases aged 15–30https://meps.ahrq.gov · Public domain
+IRB waiver applies. No individual-level data were analysed.
+
+How to Reproduce
+Requirements
+r# R 4.3+
+install.packages(c("tidyverse", "survival", "boot", "pROC", "broom"))
+Run DT3 (base case)
+rsource("DT3/dt3_simulation.R")
+source("DT3/dt3_bootstrap.R")
+# Results written to DT3/results/
+Run DT4 (Plasmode validation)
+r# MEPS data must be downloaded from https://meps.ahrq.gov and placed in data/meps/
+source("DT4/dt4_plasmode.R")
+source("DT4/dt4_bootstrap.R")
+Run DT5 (empirical calibration)
+r# PGC3 summary statistics must be downloaded and placed in data/pgc3/
+source("DT5/dt5_prs_module.R")
+source("DT5/dt5_empirical.R")
+
+Citation
+If you use this code or data tables, please cite:
+
+Marroni IV. The Pre-Depression Window in Bipolar II Disorder: A Three-Framework, Multi-Scenario Genomic Simulation Study with Clinical Prevention Protocol for Asymptomatic First-Degree Relatives. F1000Research, 2026. DOI: [to be assigned after publication]
+
+Zenodo archive (code + tables snapshot): DOI: [to be assigned]
+
+License
+Code: MIT License
+Data tables: CC BY 4.0
+Input data (MEPS, UKB, PGC3): subject to their respective original licenses — see data/DATA_SOURCES.md.
+
+Contact
+Igor Villela Marroni · igorvmarroni@gmail.com
